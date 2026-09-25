@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-psd" {
     str owner = "dymokomi"
-    str version = "0.1.1"
+    str version = "0.2.0"
     str kind = "package"
     str language = "luce-base"
     str description = "A Photoshop document reader for Luce/Base: layers as RGBA buffers with their names, blend modes, opacity and clipping."
