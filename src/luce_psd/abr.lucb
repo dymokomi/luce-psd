@@ -1,0 +1,413 @@
+## Photoshop brush files (`.abr`, Photoshop 7 and later: versions 6 to 10)
+## opened for Luce: the brush presets of the `desc` section, each an action
+## descriptor read by dotted path ("Brsh.Dmtr", "szVr.bVTy", "useScatter"),
+## with the sampled tips (`samp`) and texture patterns (`patt`) they name by
+## UUID decoded on demand. What the settings mean is the caller's to map;
+## this reads them faithfully. Older files (versions 1 and 2, tips only) are
+## refused.
+import c
+import files
+import interop
+import memory
+import strings
+from luce_psd.descriptor import Descriptor, read_descriptor, utf16_to_utf8, no_node, node_number, node_text, node_enum
+from luce_psd.abr_images import Picture, TipHeader, PatternHeader, index_pictures, find_picture, tip_header, decode_tip, pattern_header, decode_pattern
+
+## The file is not a brush file this reader understands.
+pub let invalid_abr: ErrorCode = ErrorCode.package(335)
+## The brush file was closed.
+pub let closed_abr: ErrorCode = ErrorCode.package(336)
+
+## The largest brush file read, in bytes.
+let file_limit: usize = 1073741824
+
+pub struct Abr:
+    ## The whole file, owned: descriptors and pictures point into it.
+    var data: u8[]
+    var version: u16
+    var subversion: u16
+    var descriptor: Descriptor
+    ## The list of presets in the descriptor, or `no_node`.
+    var presets: usize
+    var samples: Picture[]
+    var patterns: Picture[]
+    ## The last decoded tip or pattern, which Luce copies.
+    var image: u8[]
+    var closed: bool
+
+    ## The brush file at `path`.
+    pub static func open(path: str) -> interop.Reference[Abr]!:
+        # The file is read on the heap whatever the caller has current.
+        with memory.heap:
+            let native = try strings.copy(path)
+            defer strings.release(native)
+            let data = try files.read_limit((c.str)native, file_limit)
+            defer free(data)
+            return try Abr.parse(data)
+
+    ## The brush file in `bytes` (copied).
+    pub static func parse(bytes: const u8[]) -> interop.Reference[Abr]!:
+        var reservation = try interop.Reservation[Abr](abr_type)
+        errdefer reservation.cancel()
+        let data = try alloc u8[bytes.length] in memory.heap
+        errdefer free(data) in memory.heap
+        memory.copy(data, bytes, bytes.length)
+        var abr = Abr(data = data, presets = no_node)
+        try abr.index()
+        let native = new Abr(data = abr.data, version = abr.version, subversion = abr.subversion, descriptor = abr.descriptor, presets = abr.presets,
+                             samples = abr.samples, patterns = abr.patterns) in memory.heap catch failure:
+            abr.release_index()
+            error(failure.code, failure.message)
+        return reservation.publish(native, memory.heap)
+
+    ## Read the header and sections: the descriptor parsed, the pictures indexed.
+    mutating func index() -> !:
+        errdefer self.release_index()
+        let d = self.data
+        if d.length < 4:
+            error(invalid_abr, "the file is too short to be a brush file")
+        self.version = ((u16)d[0] << 8) | (u16)d[1]
+        self.subversion = ((u16)d[2] << 8) | (u16)d[3]
+        if self.version < 6 or self.version > 10:
+            error(invalid_abr, "only Photoshop 7 and later brush files (versions 6 to 10) are read")
+        var at: usize = 4
+        var have_descriptor = false
+        while at + 12 <= d.length:
+            if d[at] != 56 or d[at + 1] != 66 or d[at + 2] != 73 or d[at + 3] != 77:
+                error(invalid_abr, "a brush file section does not start with 8BIM")
+            let key = word32(d, at + 4)
+            let length = (usize)word32(d, at + 8)
+            let start = at + 12
+            if length > d.length - start:
+                error(invalid_abr, "a brush file section runs past the end")
+            let end = start + length
+            # samp
+            if key == 0x73616d70 and self.samples.length == 0:
+                self.samples = try index_pictures(d, start, end, true)
+            # patt
+            elif key == 0x70617474 and self.patterns.length == 0:
+                self.patterns = try index_pictures(d, start, end, false)
+            # desc: a version word, then the descriptor.
+            elif key == 0x64657363 and not have_descriptor and length > 4:
+                var stop: usize = 0
+                self.descriptor = try read_descriptor(d[..<end], start + 4, &stop)
+                have_descriptor = true
+                self.presets = self.descriptor.find(d, self.descriptor.root, "Brsh")
+            at = end
+        if not have_descriptor or self.presets == no_node:
+            error(invalid_abr, "the brush file has no presets")
+
+    mutating func release_index():
+        self.descriptor.close()
+        if self.samples.length > 0:
+            free(self.samples) in memory.heap
+            self.samples = self.samples[..<0]
+        if self.patterns.length > 0:
+            free(self.patterns) in memory.heap
+            self.patterns = self.patterns[..<0]
+
+    pub mutating func close():
+        if self.closed:
+            return
+        self.closed = true
+        self.release_index()
+        free(self.data) in memory.heap
+        if self.image.length > 0:
+            free(self.image) in memory.heap
+
+    func require_open() -> !:
+        if self.closed:
+            error(closed_abr, "the brush file is closed")
+
+    ## How many brush presets the file holds.
+    pub func count() -> i64!:
+        try self.require_open()
+        return (i64)self.descriptor.children(self.presets)
+
+    ## The node at `path` under preset `preset`, or `no_node`.
+    func node(preset: i64, path: str) -> usize!:
+        try self.require_open()
+        if preset < 0 or preset >= (i64)self.descriptor.children(self.presets):
+            error(invalid_abr, "there is no brush preset at that index")
+        var at = self.descriptor.nodes[self.presets].first
+        for _ in 0..<(usize)preset:
+            at = self.descriptor.nodes[at].next
+        return self.descriptor.find(self.data, at, path)
+
+    ## Whether preset `preset` has a setting at `path`.
+    pub func has(preset: i64, path: str) -> bool!:
+        return (try self.node(preset, path)) != no_node
+
+    ## The number at `path` (a double, a unit's value, an integer, or a
+    ## boolean as 0 or 1), or `fallback` when absent or not a number.
+    pub func number(preset: i64, path: str, fallback: f64) -> f64!:
+        let at = try self.node(preset, path)
+        if at == no_node or self.descriptor.nodes[at].kind != node_number:
+            return fallback
+        return self.descriptor.nodes[at].number
+
+    ## The text at `path`: a string, or an enum's value key ("CBrn" for
+    ## Color Burn); empty when absent.
+    pub func text(preset: i64, path: str) -> interop.Owned[str]!:
+        let at = try self.node(preset, path)
+        if at == no_node:
+            return try interop.copy_text("")
+        let node = self.descriptor.nodes[at]
+        if node.kind == node_enum:
+            return try interop.copy_text(trimmed((str)self.data[node.text_at..<node.text_at + node.text_units]))
+        if node.kind != node_text:
+            return try interop.copy_text("")
+        let out = try alloc u8[node.text_units * 3 + 1] in memory.heap
+        defer free(out) in memory.heap
+        let length = utf16_to_utf8(self.data, node.text_at, node.text_units, out)
+        return try interop.copy_text((str)out[..<length])
+
+    ## The unit of the number at `path` ("#Pxl", "#Prc", "#Ang") or an enum's
+    ## type ("BlnM"); empty when it has none.
+    pub func unit_key(preset: i64, path: str) -> interop.Owned[str]!:
+        let at = try self.node(preset, path)
+        if at == no_node or self.descriptor.nodes[at].unit_key == 0:
+            return try interop.copy_text("")
+        let key = self.descriptor.nodes[at].unit_key
+        var bytes: u8[4] = [(u8)(key >> 24), (u8)(key >> 16), (u8)(key >> 8), (u8)key]
+        return try interop.copy_text(trimmed((str)bytes[..<4]))
+
+    ## The sampled tip the brush descriptor at `path` names ("Brsh", or
+    ## "dualBrush.Brsh"), or none for a computed (round) tip.
+    func tip_of(preset: i64, path: str) -> (Picture, TipHeader)?!:
+        let brush = try self.node(preset, path)
+        if brush == no_node:
+            return none
+        let id = self.descriptor.child(self.data, brush, "sampledData".bytes)
+        if id == no_node or self.descriptor.nodes[id].kind != node_text:
+            return none
+        let picture = try self.picture(self.samples, id) else return none
+        return (picture, try tip_header(self.data, picture, self.subversion))
+
+    ## The width of the tip at `path` (see `tip`), 0 for a computed tip.
+    pub func tip_width(preset: i64, path: str) -> i64!:
+        let (_, header) = (try self.tip_of(preset, path)) else return 0
+        return (i64)header.width
+
+    pub func tip_height(preset: i64, path: str) -> i64!:
+        let (_, header) = (try self.tip_of(preset, path)) else return 0
+        return (i64)header.height
+
+    ## The coverage of the tip at `path`, `tip_width * tip_height` bytes
+    ## (255 paints), empty for a computed tip.
+    pub mutating func tip(preset: i64, path: str) -> const u8[]!:
+        let (picture, header) = (try self.tip_of(preset, path)) else return self.data[..<0]
+        let out = try self.buffer(header.width * header.height)
+        try decode_tip(self.data, picture, header, out)
+        return out
+
+    ## The pattern the `Ptrn` object at `path` names ("Txtr"), or none.
+    func pattern_of(preset: i64, path: str) -> (Picture, PatternHeader)?!:
+        let object = try self.node(preset, path)
+        if object == no_node:
+            return none
+        let id = self.descriptor.child(self.data, object, "Idnt".bytes)
+        if id == no_node or self.descriptor.nodes[id].kind != node_text:
+            return none
+        let picture = try self.picture(self.patterns, id) else return none
+        return (picture, try pattern_header(self.data, picture))
+
+    pub func pattern_width(preset: i64, path: str) -> i64!:
+        let (_, header) = (try self.pattern_of(preset, path)) else return 0
+        return (i64)header.width
+
+    pub func pattern_height(preset: i64, path: str) -> i64!:
+        let (_, header) = (try self.pattern_of(preset, path)) else return 0
+        return (i64)header.height
+
+    ## The gray of the pattern at `path`, `pattern_width * pattern_height`
+    ## bytes, empty when the preset names none this file carries.
+    pub mutating func pattern(preset: i64, path: str) -> const u8[]!:
+        let (picture, header) = (try self.pattern_of(preset, path)) else return self.data[..<0]
+        let out = try self.buffer(header.width * header.height)
+        try decode_pattern(self.data, picture, header, out)
+        return out
+
+    ## The picture among `pictures` whose UUID is the text node `id`, or none.
+    func picture(pictures: const Picture[], id: usize) -> Picture?!:
+        let node = self.descriptor.nodes[id]
+        let out = try alloc u8[node.text_units * 3 + 1] in memory.heap
+        defer free(out) in memory.heap
+        let length = utf16_to_utf8(self.data, node.text_at, node.text_units, out)
+        return find_picture(self.data, pictures, out[..<length])
+
+    ## The decode buffer at `size` bytes.
+    mutating func buffer(size: usize) -> u8[]!:
+        if self.image.length != size:
+            if self.image.length > 0:
+                free(self.image) in memory.heap
+                self.image = self.image[..<0]
+            self.image = try alloc u8[size] in memory.heap
+        return self.image
+
+pub let abr_type: interop.Type[Abr] = interop.Type[Abr]("PhotoshopBrushes", Abr.close, closeable = true)
+
+func word32(data: const u8[], at: usize) -> u32:
+    return ((u32)data[at] << 24) | ((u32)data[at + 1] << 16) | ((u32)data[at + 2] << 8) | (u32)data[at + 3]
+
+## `text` without trailing spaces.
+func trimmed(text: str) -> str:
+    var length = text.length
+    while length > 0 and text.bytes[length - 1] == 32:
+        length -= 1
+    return (str)text.bytes[..<length]
+
+# -- Tests: a small brush file built by hand.
+
+func put(bytes: u8[], at: usize*, values: const u8[]):
+    for value in values:
+        bytes[*at] = value
+        *at += 1
+
+func put_u32(bytes: u8[], at: usize*, value: usize):
+    put(bytes, at, [(u8)(value >> 24), (u8)(value >> 16), (u8)(value >> 8), (u8)value])
+
+## A descriptor key: a zero length for four characters, else the length.
+func put_key(bytes: u8[], at: usize*, key: str):
+    put_u32(bytes, at, 0 if key.length == 4 else key.length)
+    put(bytes, at, key.bytes)
+
+## A Unicode string: its UTF-16 units (ASCII here).
+func put_text(bytes: u8[], at: usize*, text: str):
+    put_u32(bytes, at, text.length)
+    for byte in text.bytes:
+        put(bytes, at, [0, byte])
+
+## An 8BIM section header whose length is patched by `end_section`.
+func begin_section(bytes: u8[], at: usize*, key: str) -> usize:
+    put(bytes, at, "8BIM".bytes)
+    put(bytes, at, key.bytes)
+    put_u32(bytes, at, 0)
+    return *at
+
+func end_section(bytes: u8[], at: usize*, start: usize):
+    var length_at = start - 4
+    put_u32(bytes, &length_at, *at - start)
+
+test "a brush file's preset reads by path, with its sampled tip and RLE pattern":
+    var bytes: u8[1024]
+    var at: usize = 0
+    put(bytes, &at, [0, 10, 0, 2])
+    # samp: one 2×2 raw tip, "$t1", after the 264 bytes version 2 keeps.
+    let samples = begin_section(bytes, &at, "samp")
+    put_u32(bytes, &at, 4 + 264 + 16 + 3 + 4)
+    put(bytes, &at, [3, 36, 116, 49])
+    for _ in 0..<(usize)264:
+        put(bytes, &at, [0])
+    for value in [(usize)0, 0, 2, 2]:
+        put_u32(bytes, &at, value)
+    put(bytes, &at, [0, 8, 0, 0, 255, 128, 64])
+    put(bytes, &at, [0])
+    end_section(bytes, &at, samples)
+    # patt: one 2×2 gray pattern "$p1", one PackBits channel.
+    let patterns = begin_section(bytes, &at, "patt")
+    let record = at
+    put_u32(bytes, &at, 0)
+    put_u32(bytes, &at, 1)
+    put_u32(bytes, &at, 1)
+    put(bytes, &at, [0, 2, 0, 2])
+    put_text(bytes, &at, "P")
+    put(bytes, &at, [3, 36, 112, 49])
+    put_u32(bytes, &at, 3)
+    put_u32(bytes, &at, 0)
+    for _ in 0..<(usize)4:
+        put_u32(bytes, &at, 0)
+    put_u32(bytes, &at, 1)
+    put_u32(bytes, &at, 1)
+    put_u32(bytes, &at, 4 + 16 + 3 + 4 + 5)
+    put_u32(bytes, &at, 8)
+    for value in [(usize)0, 0, 2, 2]:
+        put_u32(bytes, &at, value)
+    put(bytes, &at, [0, 8, 1, 0, 3, 0, 2, 1, 10, 20, 255, 30])
+    var record_length = record
+    put_u32(bytes, &record_length, at - record - 4)
+    while (at - record) % 4 != 0:
+        put(bytes, &at, [0])
+    end_section(bytes, &at, patterns)
+    # desc: presets = [{Nm: "Ab", Brsh: {Dmtr: 12.5 px, sampledData: "$t1"},
+    # useTexture: true, Txtr: {Idnt: "$p1"}, textureBlendMode: CBrn, szVr: {bVTy: 2}}].
+    let description = begin_section(bytes, &at, "desc")
+    put_u32(bytes, &at, 16)
+    put_text(bytes, &at, "")
+    put_key(bytes, &at, "null")
+    put_u32(bytes, &at, 1)
+    put_key(bytes, &at, "Brsh")
+    put(bytes, &at, "VlLs".bytes)
+    put_u32(bytes, &at, 1)
+    put(bytes, &at, "Objc".bytes)
+    put_text(bytes, &at, "")
+    put_key(bytes, &at, "brushPreset")
+    put_u32(bytes, &at, 6)
+    put_key(bytes, &at, "Nm  ")
+    put(bytes, &at, "TEXT".bytes)
+    put_text(bytes, &at, "Ab")
+    put_key(bytes, &at, "Brsh")
+    put(bytes, &at, "Objc".bytes)
+    put_text(bytes, &at, "")
+    put_key(bytes, &at, "sampledBrush")
+    put_u32(bytes, &at, 2)
+    put_key(bytes, &at, "Dmtr")
+    put(bytes, &at, "UntF#Pxl".bytes)
+    put(bytes, &at, [0x40, 0x29, 0, 0, 0, 0, 0, 0])
+    put_key(bytes, &at, "sampledData")
+    put(bytes, &at, "TEXT".bytes)
+    put_text(bytes, &at, "$t1")
+    put_key(bytes, &at, "useTexture")
+    put(bytes, &at, "bool".bytes)
+    put(bytes, &at, [1])
+    put_key(bytes, &at, "Txtr")
+    put(bytes, &at, "Objc".bytes)
+    put_text(bytes, &at, "")
+    put_key(bytes, &at, "Ptrn")
+    put_u32(bytes, &at, 1)
+    put_key(bytes, &at, "Idnt")
+    put(bytes, &at, "TEXT".bytes)
+    put_text(bytes, &at, "$p1")
+    put_key(bytes, &at, "textureBlendMode")
+    put(bytes, &at, "enum".bytes)
+    put_key(bytes, &at, "BlnM")
+    put_key(bytes, &at, "CBrn")
+    put_key(bytes, &at, "szVr")
+    put(bytes, &at, "Objc".bytes)
+    put_text(bytes, &at, "")
+    put_key(bytes, &at, "brVr")
+    put_u32(bytes, &at, 1)
+    put_key(bytes, &at, "bVTy")
+    put(bytes, &at, "long".bytes)
+    put_u32(bytes, &at, 2)
+    end_section(bytes, &at, description)
+
+    let file = try Abr.parse(bytes[..<at])
+    defer file.release()
+    var abr = file.value()
+    assert((try abr.count()) == 1)
+    let name = try abr.text(0, "Nm")
+    defer name.release()
+    assert(name.value == "Ab")
+    assert((try abr.number(0, "Brsh.Dmtr", 0.0)) == 12.5 and (try abr.number(0, "szVr.bVTy", 0.0)) == 2.0)
+    assert((try abr.number(0, "useTexture", 0.0)) == 1.0 and (try abr.number(0, "useScatter", -1.0)) == -1.0)
+    assert(try abr.has(0, "Txtr.Idnt") and not (try abr.has(0, "dualBrush.Brsh")))
+    let measure = try abr.unit_key(0, "Brsh.Dmtr")
+    defer measure.release()
+    assert(measure.value == "#Pxl")
+    let blend = try abr.text(0, "textureBlendMode")
+    defer blend.release()
+    assert(blend.value == "CBrn")
+    assert((try abr.tip_width(0, "Brsh")) == 2 and (try abr.tip_height(0, "Brsh")) == 2)
+    let tip = try abr.tip(0, "Brsh")
+    assert(tip.length == 4 and tip[0] == 0 and tip[1] == 255 and tip[3] == 64)
+    assert((try abr.pattern_width(0, "Txtr")) == 2)
+    let pattern = try abr.pattern(0, "Txtr")
+    assert(pattern.length == 4 and pattern[0] == 10 and pattern[1] == 20 and pattern[2] == 30 and pattern[3] == 30)
+    assert((try abr.tip_width(0, "Txtr")) == 0)
+    var refused = false
+    discard(Abr.parse(bytes[..<3]) catch failure:
+        assert(failure.code == invalid_abr)
+        refused = true
+        recover file)
+    assert(refused)

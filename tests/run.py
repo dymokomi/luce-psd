@@ -7,6 +7,7 @@ BASE = ROOT.parent / "luce-base/build/luce-base"
 MODES = [["--native"], ["--backend=c"]]
 env = dict(os.environ, LUCE_BASE=str(BASE.resolve()))
 for flags in MODES:
-    subprocess.run([str(BASE.resolve()), "test", str(ROOT / "src/luce_psd/psd.lucb"), *flags],
-                   env=env, check=True, timeout=180)
+    for module in ["psd.lucb", "abr.lucb"]:
+        subprocess.run([str(BASE.resolve()), "test", str(ROOT / "src/luce_psd" / module), *flags],
+                       env=env, check=True, timeout=180)
 print("PASS luce-psd parser")

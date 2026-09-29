@@ -1,0 +1,325 @@
+## Photoshop action descriptors: the keyed trees brush presets, layer effects
+## and actions are saved as. `read_descriptor` parses one into a flat list of
+## nodes (children linked to their parent by first/next indices), keeping
+## keys and text as offsets into the source bytes, which must outlive it.
+## `find` walks a dotted path such as "Brsh.Dmtr" or "dualBrush.Brsh"; a key's
+## trailing spaces never need spelling ("Nm" finds "Nm  "), and a list item is
+## its index ("Brsh.3").
+import memory
+
+## The bytes are not a descriptor this reader understands.
+pub let invalid_descriptor: ErrorCode = ErrorCode.package(332)
+
+## What a node holds.
+pub let node_object: u8 = 0
+pub let node_list: u8 = 1
+## `number`: doub, long, comp, bool (0 or 1), or a unit float (`unit` names the unit).
+pub let node_number: u8 = 2
+## `text`: UTF-16 code units at `text_at`, `text_units` of them.
+pub let node_text: u8 = 3
+## `text`: the enum's value key, ASCII at `text_at`; `unit` holds its type key.
+pub let node_enum: u8 = 4
+## Raw data, a class or reference: nothing a preset reads.
+pub let node_other: u8 = 5
+
+## No node: the end of a sibling chain.
+pub let no_node: usize = ~(usize)0
+
+pub struct Node:
+    pub var kind: u8
+    ## The key in the source (trailing spaces kept), empty for a list item.
+    pub var key_at: usize
+    pub var key_length: usize
+    pub var number: f64
+    pub var text_at: usize
+    pub var text_units: usize
+    ## A unit float's unit ("#Pxl", "#Prc", "#Ang") or an enum's type, as four ASCII bytes.
+    pub var unit_key: u32
+    pub var first: usize
+    pub var next: usize
+
+pub struct Descriptor:
+    pub var nodes: Node[]
+    pub var count: usize
+    ## The root object: node 0 once read.
+    pub var root: usize
+
+    pub mutating func close():
+        if self.nodes.length > 0:
+            free(self.nodes) in memory.heap
+        self.count = 0
+
+    ## The node at dotted `path` under `start`, or `no_node`.
+    pub func find(data: const u8[], start: usize, path: str) -> usize:
+        var at = start
+        var rest = path.bytes
+        while rest.length > 0 and at != no_node:
+            var end: usize = 0
+            while end < rest.length and rest[end] != 46:
+                end += 1
+            at = self.child(data, at, rest[..<end])
+            rest = rest[end + 1..] if end < rest.length else rest[rest.length..]
+        return at
+
+    ## The child of `parent` called `name` (a list item by its index), or `no_node`.
+    pub func child(data: const u8[], parent: usize, name: const u8[]) -> usize:
+        if parent == no_node:
+            return no_node
+        let node = self.nodes[parent]
+        var at = node.first
+        if node.kind == node_list:
+            var wanted: usize = 0
+            if name.length == 0:
+                return no_node
+            for digit in name:
+                if digit < 48 or digit > 57:
+                    return no_node
+                wanted = wanted * 10 + (usize)(digit - 48)
+            while at != no_node and wanted > 0:
+                at = self.nodes[at].next
+                wanted -= 1
+            return at
+        while at != no_node:
+            let candidate = self.nodes[at]
+            if same_key(data[candidate.key_at..<candidate.key_at + candidate.key_length], name):
+                return at
+            at = candidate.next
+        return no_node
+
+    ## How many children `parent` has.
+    pub func children(parent: usize) -> usize:
+        if parent == no_node:
+            return 0
+        var count: usize = 0
+        var at = self.nodes[parent].first
+        while at != no_node:
+            count += 1
+            at = self.nodes[at].next
+        return count
+
+## Whether a stored key matches `name`, ignoring the key's trailing spaces.
+func same_key(key: const u8[], name: const u8[]) -> bool:
+    var length = key.length
+    while length > 0 and key[length - 1] == 32:
+        length -= 1
+    if length != name.length:
+        return false
+    for index in 0..<length:
+        if key[index] != name[index]:
+            return false
+    return true
+
+## Parse the descriptor starting at `at` in `data` (its class name first,
+## no version word); `end` returns where it stopped.
+pub func read_descriptor(data: const u8[], at: usize, end: usize*) -> Descriptor!:
+    var parser = Parser(data = data, at = at)
+    errdefer parser.close()
+    let root = try parser.add(node_object, 0, 0)
+    try parser.object(root, 0)
+    *end = parser.at
+    return Descriptor(nodes = parser.nodes, count = parser.count, root = root)
+
+## How deep objects and lists may nest.
+let depth_limit: usize = 64
+## How many nodes one descriptor may hold.
+let node_limit: usize = 4194304
+
+struct Parser:
+    var data: const u8[]
+    var at: usize
+    var nodes: Node[]
+    var count: usize
+
+    mutating func close():
+        if self.nodes.length > 0:
+            free(self.nodes) in memory.heap
+
+    mutating func need(count: usize) -> !:
+        if count > self.data.length or self.at > self.data.length - count:
+            error(invalid_descriptor, "the descriptor ends early")
+
+    mutating func byte() -> u8!:
+        try self.need(1)
+        self.at += 1
+        return self.data[self.at - 1]
+
+    mutating func dword() -> u32!:
+        try self.need(4)
+        let d = self.data
+        let value = ((u32)d[self.at] << 24) | ((u32)d[self.at + 1] << 16) | ((u32)d[self.at + 2] << 8) | (u32)d[self.at + 3]
+        self.at += 4
+        return value
+
+    mutating func qword() -> u64!:
+        let high = (u64)(try self.dword())
+        return (high << 32) | (u64)(try self.dword())
+
+    mutating func skip(count: usize) -> !:
+        try self.need(count)
+        self.at += count
+
+    ## A key: a length, or 0 for four bytes; returns where it starts and its length.
+    mutating func key() -> (usize, usize)!:
+        var length = (usize)(try self.dword())
+        if length == 0:
+            length = 4
+        let start = self.at
+        try self.skip(length)
+        return (start, length)
+
+    ## A Unicode string: a count of UTF-16 units, then the units.
+    mutating func unicode() -> (usize, usize)!:
+        let units = (usize)(try self.dword())
+        let start = self.at
+        try self.skip(units *? 2 else error(invalid_descriptor, "a string is too long"))
+        return (start, units)
+
+    ## A new childless node at the end.
+    mutating func add(kind: u8, key_at: usize, key_length: usize) -> usize!:
+        if self.count == self.nodes.length:
+            if self.count >= node_limit:
+                error(invalid_descriptor, "the descriptor has too many entries")
+            let grown = try alloc Node[self.count * 2 if self.count > 0 else 256] in memory.heap
+            if self.count > 0:
+                memory.copy(grown, self.nodes, self.count)
+                free(self.nodes) in memory.heap
+            self.nodes = grown
+        self.nodes[self.count] = Node(kind = kind, key_at = key_at, key_length = key_length, first = no_node, next = no_node)
+        self.count += 1
+        return self.count - 1
+
+    ## Link `node` as the last child of `parent`, after `last` (or first when none).
+    mutating func link(parent: usize, last: usize, node: usize):
+        if last == no_node:
+            self.nodes[parent].first = node
+        else:
+            self.nodes[last].next = node
+
+    ## An object's body into `node`: class name, class key, then keyed items.
+    mutating func object(node: usize, depth: usize) -> !:
+        if depth > depth_limit:
+            error(invalid_descriptor, "the descriptor nests too deeply")
+        discard(try self.unicode())
+        discard(try self.key())
+        let items = try self.dword()
+        var last = no_node
+        for _ in 0..<items:
+            let (key_at, key_length) = try self.key()
+            let child = try self.item(key_at, key_length, depth + 1)
+            self.link(node, last, child)
+            last = child
+
+    ## One typed item, keyed or (in a list) not.
+    mutating func item(key_at: usize, key_length: usize, depth: usize) -> usize!:
+        if depth > depth_limit:
+            error(invalid_descriptor, "the descriptor nests too deeply")
+        let kind = try self.dword()
+        # Objc, GlbO: an object.
+        if kind == 0x4f626a63 or kind == 0x476c624f:
+            let node = try self.add(node_object, key_at, key_length)
+            try self.object(node, depth)
+            return node
+        # VlLs: a list of typed items.
+        if kind == 0x566c4c73:
+            let node = try self.add(node_list, key_at, key_length)
+            let items = try self.dword()
+            var last = no_node
+            for _ in 0..<items:
+                let child = try self.item(0, 0, depth + 1)
+                self.link(node, last, child)
+                last = child
+            return node
+        let node = try self.add(node_other, key_at, key_length)
+        # doub
+        if kind == 0x646f7562:
+            self.nodes[node].kind = node_number
+            self.nodes[node].number = f64.bits(try self.qword())
+        # UntF: a unit, then a double.
+        elif kind == 0x556e7446:
+            self.nodes[node].kind = node_number
+            self.nodes[node].unit_key = try self.dword()
+            self.nodes[node].number = f64.bits(try self.qword())
+        # long
+        elif kind == 0x6c6f6e67:
+            self.nodes[node].kind = node_number
+            self.nodes[node].number = (f64)(i32)(try self.dword())
+        # comp: a 64-bit integer.
+        elif kind == 0x636f6d70:
+            self.nodes[node].kind = node_number
+            self.nodes[node].number = (f64)(i64)(try self.qword())
+        # bool
+        elif kind == 0x626f6f6c:
+            self.nodes[node].kind = node_number
+            self.nodes[node].number = 1.0 if (try self.byte()) != 0 else 0.0
+        # TEXT
+        elif kind == 0x54455854:
+            let (start, units) = try self.unicode()
+            self.nodes[node].kind = node_text
+            self.nodes[node].text_at = start
+            self.nodes[node].text_units = units
+        # enum: its type key, then its value key.
+        elif kind == 0x656e756d:
+            let (type_at, type_length) = try self.key()
+            let (value_at, value_length) = try self.key()
+            self.nodes[node].kind = node_enum
+            self.nodes[node].unit_key = four(self.data, type_at, type_length)
+            self.nodes[node].text_at = value_at
+            self.nodes[node].text_units = value_length
+        # tdta, alis: counted raw data.
+        elif kind == 0x74647461 or kind == 0x616c6973:
+            try self.skip((usize)(try self.dword()))
+        # type, GlbC: a class (a name and a key).
+        elif kind == 0x74797065 or kind == 0x476c6243:
+            discard(try self.unicode())
+            discard(try self.key())
+        else:
+            error(invalid_descriptor, "the descriptor holds an item type this reader does not know")
+        return node
+
+## A key's first four bytes as a number (fewer: space padded).
+func four(data: const u8[], at: usize, length: usize) -> u32:
+    var value: u32 = 0
+    for index in 0..<(usize)4:
+        value = (value << 8) | (u32)(data[at + index] if index < length else 32)
+    return value
+
+## The UTF-16 big-endian text of `units` code units at `at`, as UTF-8 into
+## `out` (at least `units * 3` bytes); returns the bytes written. A trailing
+## NUL ends it; an unpaired surrogate becomes U+FFFD.
+pub func utf16_to_utf8(data: const u8[], at: usize, units: usize, out: u8[]) -> usize:
+    var written: usize = 0
+    var index: usize = 0
+    while index < units:
+        var point = ((u32)data[at + index * 2] << 8) | (u32)data[at + index * 2 + 1]
+        index += 1
+        if point == 0:
+            break
+        if point >= 0xd800 and point < 0xdc00 and index < units:
+            let low = ((u32)data[at + index * 2] << 8) | (u32)data[at + index * 2 + 1]
+            if low >= 0xdc00 and low < 0xe000:
+                point = 0x10000 + ((point - 0xd800) << 10) + (low - 0xdc00)
+                index += 1
+            else:
+                point = 0xfffd
+        elif point >= 0xd800 and point < 0xe000:
+            point = 0xfffd
+        if point < 0x80:
+            out[written] = (u8)point
+            written += 1
+        elif point < 0x800:
+            out[written] = (u8)(0xc0 | (point >> 6))
+            out[written + 1] = (u8)(0x80 | (point & 0x3f))
+            written += 2
+        elif point < 0x10000:
+            out[written] = (u8)(0xe0 | (point >> 12))
+            out[written + 1] = (u8)(0x80 | ((point >> 6) & 0x3f))
+            out[written + 2] = (u8)(0x80 | (point & 0x3f))
+            written += 3
+        else:
+            # Four bytes: a pair consumed two units, so six bytes were budgeted.
+            out[written] = (u8)(0xf0 | (point >> 18))
+            out[written + 1] = (u8)(0x80 | ((point >> 12) & 0x3f))
+            out[written + 2] = (u8)(0x80 | ((point >> 6) & 0x3f))
+            out[written + 3] = (u8)(0x80 | (point & 0x3f))
+            written += 4
+    return written

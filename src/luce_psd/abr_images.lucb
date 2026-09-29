@@ -1,0 +1,264 @@
+## The pictures a Photoshop brush file carries: sampled tips (its `samp`
+## section) and patterns for textures (`patt`, laid out as a `.pat` file's).
+## Each is indexed first, by its UUID and where its bytes lie, and decoded on
+## demand: raw or PackBits rows, 8 or 16 bits, into one byte a pixel. A tip's
+## byte is coverage (255 paints); a pattern's is its gray (RGB as luma,
+## indexed through its palette).
+import memory
+
+## The brush file's pictures are not laid out as this reader expects.
+pub let invalid_image: ErrorCode = ErrorCode.package(333)
+## A picture larger than this reader will decode.
+pub let image_limit: ErrorCode = ErrorCode.package(334)
+
+## The widest side a tip or pattern may have.
+let side_limit: usize = 30000
+
+## Where a picture's record lies: its UUID (ASCII) and the bytes after it.
+pub struct Picture:
+    pub var id_at: usize
+    pub var id_length: usize
+    pub var at: usize
+    pub var end: usize
+
+## A tip's header: its size, bit depth, compression and where the pixels start.
+pub struct TipHeader:
+    pub var width: usize
+    pub var height: usize
+    pub var depth: u16
+    pub var compressed: bool
+    pub var pixels_at: usize
+
+## A pattern's header: its size, color mode (1 gray, 2 indexed, 3 RGB), its
+## palette (indexed only) and where its channels start.
+pub struct PatternHeader:
+    pub var width: usize
+    pub var height: usize
+    pub var mode: u32
+    pub var palette_at: usize
+    pub var channels_at: usize
+
+struct Bytes:
+    var data: const u8[]
+    var at: usize
+    var end: usize
+
+    mutating func need(count: usize) -> !:
+        if count > self.end or self.at > self.end - count:
+            error(invalid_image, "a brush picture ends early")
+
+    mutating func byte() -> u8!:
+        try self.need(1)
+        self.at += 1
+        return self.data[self.at - 1]
+
+    mutating func word() -> u16!:
+        try self.need(2)
+        let value = ((u16)self.data[self.at] << 8) | (u16)self.data[self.at + 1]
+        self.at += 2
+        return value
+
+    mutating func dword() -> u32!:
+        try self.need(4)
+        let d = self.data
+        let value = ((u32)d[self.at] << 24) | ((u32)d[self.at + 1] << 16) | ((u32)d[self.at + 2] << 8) | (u32)d[self.at + 3]
+        self.at += 4
+        return value
+
+    mutating func signed() -> i64!:
+        return (i64)(i32)(try self.dword())
+
+    mutating func skip(count: usize) -> !:
+        try self.need(count)
+        self.at += count
+
+## The records of a `samp` or `patt` section from `at` to `end`: each a
+## length, its body, padded to four bytes. A `samp` record starts with its
+## UUID as a Pascal string; a `patt` record keeps it after its header, so
+## `id_at` there is found by `pattern_header`.
+pub func index_pictures(data: const u8[], at: usize, end: usize, samples: bool) -> Picture[]!:
+    var count: usize = 0
+    var walk = Bytes(data = data, at = at, end = end)
+    while walk.at < end:
+        let length = (usize)(try walk.dword())
+        try walk.skip(padded(length))
+        count += 1
+    let found = try alloc Picture[count] in memory.heap
+    errdefer free(found) in memory.heap
+    var reader = Bytes(data = data, at = at, end = end)
+    for index in 0..<count:
+        let length = (usize)(try reader.dword())
+        let body = reader.at
+        let body_end = body + length
+        var picture = Picture(at = body, end = body_end)
+        if samples:
+            var inner = Bytes(data = data, at = body, end = body_end)
+            picture.id_length = (usize)(try inner.byte())
+            picture.id_at = inner.at
+            try inner.skip(picture.id_length)
+            picture.at = inner.at
+        else:
+            let header = try pattern_header(data, picture)
+            discard(header)
+            var inner = Bytes(data = data, at = body + 12, end = body_end)
+            let name_units = (usize)(try inner.dword())
+            try inner.skip(name_units * 2)
+            picture.id_length = (usize)(try inner.byte())
+            picture.id_at = inner.at
+        found[index] = picture
+        try reader.skip(padded(length))
+    return found
+
+func padded(length: usize) -> usize:
+    return (length + 3) & ~(usize)3
+
+## The picture whose UUID is `id`, or none.
+pub func find_picture(data: const u8[], pictures: const Picture[], id: const u8[]) -> Picture?:
+    for picture in pictures:
+        if picture.id_length == id.length:
+            var same = true
+            for index in 0..<id.length:
+                if data[picture.id_at + index] != id[index]:
+                    same = false
+                    break
+            if same:
+                return picture
+    return none
+
+## A sampled tip's header; `subversion` 1 files keep 10 bytes before the
+## bounds, 2 files 264.
+pub func tip_header(data: const u8[], picture: Picture, subversion: u16) -> TipHeader!:
+    var reader = Bytes(data = data, at = picture.at, end = picture.end)
+    try reader.skip(10 if subversion == 1 else 264)
+    let top = try reader.signed()
+    let left = try reader.signed()
+    let bottom = try reader.signed()
+    let right = try reader.signed()
+    let depth = try reader.word()
+    let compressed = (try reader.byte()) != 0
+    try check_size(right - left, bottom - top, depth)
+    return TipHeader(width = (usize)(right - left), height = (usize)(bottom - top), depth = depth, compressed = compressed, pixels_at = reader.at)
+
+## Decode a tip's coverage into `out`, `width * height` bytes.
+pub func decode_tip(data: const u8[], picture: Picture, header: TipHeader, out: u8[]) -> !:
+    var reader = Bytes(data = data, at = header.pixels_at, end = picture.end)
+    try plane(&reader, header.width, header.height, header.depth, header.compressed, out)
+
+## A pattern's header (the record's version, mode, size, name, UUID, palette).
+pub func pattern_header(data: const u8[], picture: Picture) -> PatternHeader!:
+    var reader = Bytes(data = data, at = picture.at, end = picture.end)
+    discard(try reader.dword())
+    let mode = try reader.dword()
+    let height = (usize)(try reader.word())
+    let width = (usize)(try reader.word())
+    let name_units = (usize)(try reader.dword())
+    try reader.skip(name_units * 2)
+    try reader.skip((usize)(try reader.byte()))
+    var palette_at: usize = 0
+    if mode == 2:
+        palette_at = reader.at
+        try reader.skip(768)
+    elif mode != 1 and mode != 3:
+        error(invalid_image, "a pattern is neither gray, indexed nor RGB")
+    try check_size((i64)width, (i64)height, 8)
+    return PatternHeader(width = width, height = height, mode = mode, palette_at = palette_at, channels_at = reader.at)
+
+## Decode a pattern's gray into `out`, `width * height` bytes: its channels
+## (a virtual memory array list) read one by one, RGB mixed as Rec. 601 luma.
+pub func decode_pattern(data: const u8[], picture: Picture, header: PatternHeader, out: u8[]) -> !:
+    var reader = Bytes(data = data, at = header.channels_at, end = picture.end)
+    discard(try reader.dword())
+    discard(try reader.dword())
+    try reader.skip(16)
+    let channels = (usize)(try reader.dword())
+    let wanted: usize = 3 if header.mode == 3 else 1
+    if channels < wanted:
+        error(invalid_image, "a pattern has fewer channels than its mode needs")
+    let size = header.width * header.height
+    let planes = try alloc u8[size * wanted] in memory.heap
+    defer free(planes) in memory.heap
+    var filled: usize = 0
+    # The color channels, then a user mask and a sheet mask that may be absent.
+    for _ in 0..<channels + 2:
+        if filled == wanted or reader.at >= picture.end:
+            break
+        if (try reader.dword()) == 0:
+            continue
+        let length = (usize)(try reader.dword())
+        let next = reader.at + length
+        discard(try reader.dword())
+        let top = try reader.signed()
+        let left = try reader.signed()
+        let bottom = try reader.signed()
+        let right = try reader.signed()
+        let depth = try reader.word()
+        let compressed = (try reader.byte()) != 0
+        if (usize)(right - left) != header.width or (usize)(bottom - top) != header.height:
+            error(invalid_image, "a pattern channel's size is not the pattern's")
+        try plane(&reader, header.width, header.height, depth, compressed, planes[filled * size..<(filled + 1) * size])
+        filled += 1
+        reader.at = next
+    if filled < wanted:
+        error(invalid_image, "a pattern's channels end early")
+    for index in 0..<size:
+        if header.mode == 3:
+            let luma = 0.299 * (f64)planes[index] + 0.587 * (f64)planes[size + index] + 0.114 * (f64)planes[2 * size + index]
+            out[index] = (u8)(luma + 0.5)
+        elif header.mode == 2:
+            let entry = header.palette_at + (usize)planes[index] * 3
+            let luma = 0.299 * (f64)data[entry] + 0.587 * (f64)data[entry + 1] + 0.114 * (f64)data[entry + 2]
+            out[index] = (u8)(luma + 0.5)
+        else:
+            out[index] = planes[index]
+
+func check_size(width: i64, height: i64, depth: u16) -> !:
+    if width < 1 or height < 1 or width > (i64)side_limit or height > (i64)side_limit:
+        error(image_limit, "a brush picture is larger than this reader decodes")
+    if depth != 8 and depth != 16:
+        error(invalid_image, "a brush picture is neither 8 nor 16 bits deep")
+
+## One plane, `width` × `height`, into `out` a byte a pixel: raw, or PackBits
+## rows after a two-byte count per row; 16-bit samples keep their high byte.
+func plane(reader: Bytes*, width: usize, height: usize, depth: u16, compressed: bool, out: u8[]) -> !:
+    let bytes = (usize)(depth // 8)
+    let row_bytes = width * bytes
+    if not compressed:
+        try reader.need(row_bytes * height)
+        for index in 0..<width * height:
+            out[index] = reader.data[reader.at + index * bytes]
+        reader.at += row_bytes * height
+        return
+    let counts_at = reader.at
+    try reader.skip(height * 2)
+    let row = try alloc u8[row_bytes] in memory.heap
+    defer free(row) in memory.heap
+    for y in 0..<height:
+        let count = ((usize)reader.data[counts_at + y * 2] << 8) | (usize)reader.data[counts_at + y * 2 + 1]
+        let row_end = reader.at + count
+        try reader.need(count)
+        var filled: usize = 0
+        while filled < row_bytes and reader.at < row_end:
+            let header = reader.data[reader.at]
+            reader.at += 1
+            if header < 128:
+                let run = (usize)header + 1
+                if run > row_bytes - filled or run > row_end - reader.at:
+                    error(invalid_image, "a PackBits run overflows its row")
+                memory.copy(row[filled..], reader.data[reader.at..<reader.at + run], run)
+                reader.at += run
+                filled += run
+            elif header > 128:
+                let run = 257 - (usize)header
+                if run > row_bytes - filled or reader.at >= row_end:
+                    error(invalid_image, "a PackBits run overflows its row")
+                let value = reader.data[reader.at]
+                reader.at += 1
+                for index in 0..<run:
+                    row[filled + index] = value
+                filled += run
+        # A short row leaves the rest empty.
+        for index in filled..<row_bytes:
+            row[index] = 0
+        for x in 0..<width:
+            out[y * width + x] = row[x * bytes]
+        reader.at = row_end
