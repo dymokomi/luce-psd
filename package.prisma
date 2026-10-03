@@ -1,27 +1,16 @@
 #prisma 4.0
 def package "luce-psd" {
     str owner = "dymokomi"
-    str version = "0.2.1"
+    str version = "0.3.0"
     str kind = "package"
     str language = "luce-base"
     str description = "Photoshop file readers for Luce/Base: documents as layers (RGBA buffers with names, blend modes, opacity and clipping), brush files (.abr presets with their tips and patterns) and action descriptors."
     str readme = "README.md"
-
-    def export "psd" {
-        str module = "luce_psd.psd"
-    }
-
-    def export "abr" {
-        str module = "luce_psd.abr"
-    }
-
-    def export "descriptor" {
-        str module = "luce_psd.descriptor"
-    }
+    str[] public = ["abr", "descriptor", "psd"]
 
     def dependency "luce-std" {
         str owner = "dymokomi"
-        str version = "^0.1.4"
+        str version = "^0.2.0"
         str path = "../luce-std"
     }
 }

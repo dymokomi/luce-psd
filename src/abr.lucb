@@ -6,12 +6,12 @@
 ## this reads them faithfully. Older files (versions 1 and 2, tips only) are
 ## refused.
 import c
-import files
+import luce_std.files
 import interop
 import memory
 import strings
-from luce_psd.descriptor import Descriptor, read_descriptor, utf16_to_utf8, no_node, node_number, node_text, node_enum
-from luce_psd.abr_images import Picture, TipHeader, PatternHeader, index_pictures, find_picture, tip_header, decode_tip, pattern_header, decode_pattern
+from descriptor import Descriptor, read_descriptor, utf16_to_utf8, no_node, node_number, node_text, node_enum
+from abr_images import Picture, TipHeader, PatternHeader, index_pictures, find_picture, tip_header, decode_tip, pattern_header, decode_pattern
 
 ## The file is not a brush file this reader understands.
 pub let invalid_abr: ErrorCode = ErrorCode.package(335)
