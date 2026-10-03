@@ -6,7 +6,7 @@
 ## this reads them faithfully. Older files (versions 1 and 2, tips only) are
 ## refused.
 import c
-import luce_std.files
+from luce_std import files
 import interop
 import memory
 import strings
