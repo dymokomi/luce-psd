@@ -1,7 +1,7 @@
 #prisma 4.0
 def package "luce-psd" {
     str owner = "dymokomi"
-    str version = "0.3.1"
+    str version = "0.3.2"
     str kind = "package"
     str language = "luce-base"
     str description = "Photoshop file readers for Luce/Base: documents as layers (RGBA buffers with names, blend modes, opacity and clipping), brush files (.abr presets with their tips and patterns) and action descriptors."
@@ -10,7 +10,7 @@ def package "luce-psd" {
 
     def dependency "luce-std" {
         str owner = "dymokomi"
-        str version = "^0.2.0"
+        str version = "^0.3.1"
         str path = "../luce-std"
     }
 }

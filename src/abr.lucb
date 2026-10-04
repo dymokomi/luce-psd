@@ -41,9 +41,9 @@ pub struct Abr:
         with memory.heap:
             let native = try strings.copy(path)
             defer strings.release(native)
-            let data = try files.read_limit((c.str)native, file_limit)
-            defer free(data)
-            return try Abr.parse(data)
+            let data = try files.read((c.str)native, limit = file_limit)
+            defer data.release()
+            return try Abr.parse(data.value)
 
     ## The brush file in `bytes` (copied).
     pub static func parse(bytes: const u8[]) -> interop.Reference[Abr]!:
