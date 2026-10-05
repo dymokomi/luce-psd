@@ -44,7 +44,7 @@ pub struct Descriptor:
     ## The root object: node 0 once read.
     pub var root: usize
 
-    pub mutating func close():
+    pub func close():
         if self.nodes.length > 0:
             free(self.nodes) in memory.heap
         self.count = 0
@@ -130,36 +130,36 @@ struct Parser:
     var nodes: Node[]
     var count: usize
 
-    mutating func close():
+    func close():
         if self.nodes.length > 0:
             free(self.nodes) in memory.heap
 
-    mutating func need(count: usize) -> !:
+    func need(count: usize) -> !:
         if count > self.data.length or self.at > self.data.length - count:
             error(invalid_descriptor, "the descriptor ends early")
 
-    mutating func byte() -> u8!:
+    func byte() -> u8!:
         try self.need(1)
         self.at += 1
         return self.data[self.at - 1]
 
-    mutating func dword() -> u32!:
+    func dword() -> u32!:
         try self.need(4)
         let d = self.data
         let value = ((u32)d[self.at] << 24) | ((u32)d[self.at + 1] << 16) | ((u32)d[self.at + 2] << 8) | (u32)d[self.at + 3]
         self.at += 4
         return value
 
-    mutating func qword() -> u64!:
+    func qword() -> u64!:
         let high = (u64)(try self.dword())
         return (high << 32) | (u64)(try self.dword())
 
-    mutating func skip(count: usize) -> !:
+    func skip(count: usize) -> !:
         try self.need(count)
         self.at += count
 
     ## A key: a length, or 0 for four bytes; returns where it starts and its length.
-    mutating func key() -> (usize, usize)!:
+    func key() -> (usize, usize)!:
         var length = (usize)(try self.dword())
         if length == 0:
             length = 4
@@ -168,18 +168,18 @@ struct Parser:
         return (start, length)
 
     ## A Unicode string: a count of UTF-16 units, then the units.
-    mutating func unicode() -> (usize, usize)!:
+    func unicode() -> (usize, usize)!:
         let units = (usize)(try self.dword())
         let start = self.at
         try self.skip(units *? 2 else error(invalid_descriptor, "a string is too long"))
         return (start, units)
 
     ## A new childless node at the end.
-    mutating func add(kind: u8, key_at: usize, key_length: usize) -> usize!:
+    func add(kind: u8, key_at: usize, key_length: usize) -> usize!:
         if self.count == self.nodes.length:
             if self.count >= node_limit:
                 error(invalid_descriptor, "the descriptor has too many entries")
-            let grown = try alloc Node[self.count * 2 if self.count > 0 else 256] in memory.heap
+            let grown = try new Node[self.count * 2 if self.count > 0 else 256] --- in memory.heap
             if self.count > 0:
                 memory.copy(grown, self.nodes, self.count)
                 free(self.nodes) in memory.heap
@@ -189,18 +189,18 @@ struct Parser:
         return self.count - 1
 
     ## Link `node` as the last child of `parent`, after `last` (or first when none).
-    mutating func link(parent: usize, last: usize, node: usize):
+    func link(parent: usize, last: usize, node: usize):
         if last == no_node:
             self.nodes[parent].first = node
         else:
             self.nodes[last].next = node
 
     ## An object's body into `node`: class name, class key, then keyed items.
-    mutating func object(node: usize, depth: usize) -> !:
+    func object(node: usize, depth: usize) -> !:
         if depth > depth_limit:
             error(invalid_descriptor, "the descriptor nests too deeply")
-        discard(try self.unicode())
-        discard(try self.key())
+        _ = try self.unicode()
+        _ = try self.key()
         let items = try self.dword()
         var last = no_node
         for _ in 0..<items:
@@ -210,7 +210,7 @@ struct Parser:
             last = child
 
     ## One typed item, keyed or (in a list) not.
-    mutating func item(key_at: usize, key_length: usize, depth: usize) -> usize!:
+    func item(key_at: usize, key_length: usize, depth: usize) -> usize!:
         if depth > depth_limit:
             error(invalid_descriptor, "the descriptor nests too deeply")
         let kind = try self.dword()
@@ -270,8 +270,8 @@ struct Parser:
             try self.skip((usize)(try self.dword()))
         # type, GlbC: a class (a name and a key).
         elif kind == 0x74797065 or kind == 0x476c6243:
-            discard(try self.unicode())
-            discard(try self.key())
+            _ = try self.unicode()
+            _ = try self.key()
         else:
             error(invalid_descriptor, "the descriptor holds an item type this reader does not know")
         return node

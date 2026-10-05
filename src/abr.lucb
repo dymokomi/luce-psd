@@ -36,7 +36,7 @@ pub struct Abr:
     var closed: bool
 
     ## The brush file at `path`.
-    pub static func open(path: str) -> interop.Reference[Abr]!:
+    pub func open(path: str) -> interop.Reference[Abr]!:
         # The file is read on the heap whatever the caller has current.
         with memory.heap:
             let native = try strings.copy(path)
@@ -46,10 +46,10 @@ pub struct Abr:
             return try Abr.parse(data.value)
 
     ## The brush file in `bytes` (copied).
-    pub static func parse(bytes: const u8[]) -> interop.Reference[Abr]!:
+    pub func parse(bytes: const u8[]) -> interop.Reference[Abr]!:
         var reservation = try interop.Reservation[Abr](abr_type)
         errdefer reservation.cancel()
-        let data = try alloc u8[bytes.length] in memory.heap
+        let data = try new u8[bytes.length] --- in memory.heap
         errdefer free(data) in memory.heap
         memory.copy(data, bytes, bytes.length)
         var abr = Abr(data = data, presets = no_node)
@@ -61,7 +61,7 @@ pub struct Abr:
         return reservation.publish(native, memory.heap)
 
     ## Read the header and sections: the descriptor parsed, the pictures indexed.
-    mutating func index() -> !:
+    func index() -> !:
         errdefer self.release_index()
         let d = self.data
         if d.length < 4:
@@ -97,7 +97,7 @@ pub struct Abr:
         if not have_descriptor or self.presets == no_node:
             error(invalid_abr, "the brush file has no presets")
 
-    mutating func release_index():
+    func release_index():
         self.descriptor.close()
         if self.samples.length > 0:
             free(self.samples) in memory.heap
@@ -106,7 +106,7 @@ pub struct Abr:
             free(self.patterns) in memory.heap
             self.patterns = self.patterns[..<0]
 
-    pub mutating func close():
+    pub func close():
         if self.closed:
             return
         self.closed = true
@@ -157,7 +157,7 @@ pub struct Abr:
             return try interop.copy_text(trimmed((str)self.data[node.text_at..<node.text_at + node.text_units]))
         if node.kind != node_text:
             return try interop.copy_text("")
-        let out = try alloc u8[node.text_units * 3 + 1] in memory.heap
+        let out = try new u8[node.text_units * 3 + 1] --- in memory.heap
         defer free(out) in memory.heap
         let length = utf16_to_utf8(self.data, node.text_at, node.text_units, out)
         return try interop.copy_text((str)out[..<length])
@@ -195,7 +195,7 @@ pub struct Abr:
 
     ## The coverage of the tip at `path`, `tip_width * tip_height` bytes
     ## (255 paints), empty for a computed tip.
-    pub mutating func tip(preset: i64, path: str) -> const u8[]!:
+    pub func tip(preset: i64, path: str) -> const u8[]!:
         let (picture, header) = (try self.tip_of(preset, path)) else return self.data[..<0]
         let out = try self.buffer(header.width * header.height)
         try decode_tip(self.data, picture, header, out)
@@ -222,7 +222,7 @@ pub struct Abr:
 
     ## The gray of the pattern at `path`, `pattern_width * pattern_height`
     ## bytes, empty when the preset names none this file carries.
-    pub mutating func pattern(preset: i64, path: str) -> const u8[]!:
+    pub func pattern(preset: i64, path: str) -> const u8[]!:
         let (picture, header) = (try self.pattern_of(preset, path)) else return self.data[..<0]
         let out = try self.buffer(header.width * header.height)
         try decode_pattern(self.data, picture, header, out)
@@ -231,18 +231,18 @@ pub struct Abr:
     ## The picture among `pictures` whose UUID is the text node `id`, or none.
     func picture(pictures: const Picture[], id: usize) -> Picture?!:
         let node = self.descriptor.nodes[id]
-        let out = try alloc u8[node.text_units * 3 + 1] in memory.heap
+        let out = try new u8[node.text_units * 3 + 1] --- in memory.heap
         defer free(out) in memory.heap
         let length = utf16_to_utf8(self.data, node.text_at, node.text_units, out)
         return find_picture(self.data, pictures, out[..<length])
 
     ## The decode buffer at `size` bytes.
-    mutating func buffer(size: usize) -> u8[]!:
+    func buffer(size: usize) -> u8[]!:
         if self.image.length != size:
             if self.image.length > 0:
                 free(self.image) in memory.heap
                 self.image = self.image[..<0]
-            self.image = try alloc u8[size] in memory.heap
+            self.image = try new u8[size] --- in memory.heap
         return self.image
 
 pub let abr_type: interop.Type[Abr] = interop.Type[Abr]("PhotoshopBrushes", Abr.close, closeable = true)
@@ -406,8 +406,8 @@ test "a brush file's preset reads by path, with its sampled tip and RLE pattern"
     assert(pattern.length == 4 and pattern[0] == 10 and pattern[1] == 20 and pattern[2] == 30 and pattern[3] == 30)
     assert((try abr.tip_width(0, "Txtr")) == 0)
     var refused = false
-    discard(Abr.parse(bytes[..<3]) catch failure:
+    _ = Abr.parse(bytes[..<3]) catch failure:
         assert(failure.code == invalid_abr)
         refused = true
-        recover file)
+        recover file
     assert(refused)

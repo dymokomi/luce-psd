@@ -43,32 +43,32 @@ struct Bytes:
     var at: usize
     var end: usize
 
-    mutating func need(count: usize) -> !:
+    func need(count: usize) -> !:
         if count > self.end or self.at > self.end - count:
             error(invalid_image, "a brush picture ends early")
 
-    mutating func byte() -> u8!:
+    func byte() -> u8!:
         try self.need(1)
         self.at += 1
         return self.data[self.at - 1]
 
-    mutating func word() -> u16!:
+    func word() -> u16!:
         try self.need(2)
         let value = ((u16)self.data[self.at] << 8) | (u16)self.data[self.at + 1]
         self.at += 2
         return value
 
-    mutating func dword() -> u32!:
+    func dword() -> u32!:
         try self.need(4)
         let d = self.data
         let value = ((u32)d[self.at] << 24) | ((u32)d[self.at + 1] << 16) | ((u32)d[self.at + 2] << 8) | (u32)d[self.at + 3]
         self.at += 4
         return value
 
-    mutating func signed() -> i64!:
+    func signed() -> i64!:
         return (i64)(i32)(try self.dword())
 
-    mutating func skip(count: usize) -> !:
+    func skip(count: usize) -> !:
         try self.need(count)
         self.at += count
 
@@ -83,7 +83,7 @@ pub func index_pictures(data: const u8[], at: usize, end: usize, samples: bool) 
         let length = (usize)(try walk.dword())
         try walk.skip(padded(length))
         count += 1
-    let found = try alloc Picture[count] in memory.heap
+    let found = try new Picture[count] --- in memory.heap
     errdefer free(found) in memory.heap
     var reader = Bytes(data = data, at = at, end = end)
     for index in 0..<count:
@@ -99,7 +99,7 @@ pub func index_pictures(data: const u8[], at: usize, end: usize, samples: bool) 
             picture.at = inner.at
         else:
             let header = try pattern_header(data, picture)
-            discard(header)
+            _ = header
             var inner = Bytes(data = data, at = body + 12, end = body_end)
             let name_units = (usize)(try inner.dword())
             try inner.skip(name_units * 2)
@@ -147,7 +147,7 @@ pub func decode_tip(data: const u8[], picture: Picture, header: TipHeader, out: 
 ## A pattern's header (the record's version, mode, size, name, UUID, palette).
 pub func pattern_header(data: const u8[], picture: Picture) -> PatternHeader!:
     var reader = Bytes(data = data, at = picture.at, end = picture.end)
-    discard(try reader.dword())
+    _ = try reader.dword()
     let mode = try reader.dword()
     let height = (usize)(try reader.word())
     let width = (usize)(try reader.word())
@@ -167,15 +167,15 @@ pub func pattern_header(data: const u8[], picture: Picture) -> PatternHeader!:
 ## (a virtual memory array list) read one by one, RGB mixed as Rec. 601 luma.
 pub func decode_pattern(data: const u8[], picture: Picture, header: PatternHeader, out: u8[]) -> !:
     var reader = Bytes(data = data, at = header.channels_at, end = picture.end)
-    discard(try reader.dword())
-    discard(try reader.dword())
+    _ = try reader.dword()
+    _ = try reader.dword()
     try reader.skip(16)
     let channels = (usize)(try reader.dword())
     let wanted: usize = 3 if header.mode == 3 else 1
     if channels < wanted:
         error(invalid_image, "a pattern has fewer channels than its mode needs")
     let size = header.width * header.height
-    let planes = try alloc u8[size * wanted] in memory.heap
+    let planes = try new u8[size * wanted] --- in memory.heap
     defer free(planes) in memory.heap
     var filled: usize = 0
     # The color channels, then a user mask and a sheet mask that may be absent.
@@ -186,7 +186,7 @@ pub func decode_pattern(data: const u8[], picture: Picture, header: PatternHeade
             continue
         let length = (usize)(try reader.dword())
         let next = reader.at + length
-        discard(try reader.dword())
+        _ = try reader.dword()
         let top = try reader.signed()
         let left = try reader.signed()
         let bottom = try reader.signed()
@@ -230,7 +230,7 @@ func plane(reader: Bytes*, width: usize, height: usize, depth: u16, compressed: 
         return
     let counts_at = reader.at
     try reader.skip(height * 2)
-    let row = try alloc u8[row_bytes] in memory.heap
+    let row = try new u8[row_bytes] --- in memory.heap
     defer free(row) in memory.heap
     for y in 0..<height:
         let count = ((usize)reader.data[counts_at + y * 2] << 8) | (usize)reader.data[counts_at + y * 2 + 1]
