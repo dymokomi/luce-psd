@@ -36,7 +36,7 @@ pub struct Abr:
     var closed: bool
 
     ## The brush file at `path`.
-    pub func open(path: str) -> interop.Reference[Abr]!:
+    pub static func open(path: str) -> interop.Reference[Abr]!:
         # The file is read on the heap whatever the caller has current.
         with memory.heap:
             let native = try strings.copy(path)
@@ -46,7 +46,7 @@ pub struct Abr:
             return try Abr.parse(data.value)
 
     ## The brush file in `bytes` (copied).
-    pub func parse(bytes: const u8[]) -> interop.Reference[Abr]!:
+    pub static func parse(bytes: const u8[]) -> interop.Reference[Abr]!:
         var reservation = try interop.Reservation[Abr](abr_type)
         errdefer reservation.cancel()
         let data = try new u8[bytes.length] --- in memory.heap
