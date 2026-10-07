@@ -37,5 +37,5 @@ The `descriptor` module parses one action descriptor into a flat node list
 walked by dotted path. Brush presets use it, and PSD layer effects can too.
 
 ```
-./test.sh    # builds luce-base's tests for the parser in native and C modes
+luc test     # the parser's tests
 ```
